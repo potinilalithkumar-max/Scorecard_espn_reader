@@ -753,5 +753,5 @@ async def matchup_points(ctx, url: str = None, *, players_input: str = None):
         active_matchups.discard(dedup_key)
 
 if __name__ == "__main__":
-    DISCORD_BOT_TOKEN = "MTUwOTMyNTI4MjY1NjY1MzQ0Mw.GNpPqD.qaJtu4XkP2lQh-CbFifE7Te1jFFy0sT4zssH9k"
+    DISCORD_BOT_TOKEN = "my_token"
     bot.run(DISCORD_BOT_TOKEN)
