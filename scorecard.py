@@ -449,9 +449,9 @@ class PointsCalculator:
         )
         
         lines = []
-        lines.append("=" * 95)
+        lines.append("\n")
         lines.append("     🏏 UNIQUE PLAYER CONSOLIDATED POINTS SUMMARY 🏏")
-        lines.append("=" * 95)
+        lines.append("\n")
         lines.append(f"{'Player':<35} {'Runs':<8} {'Wkts':<8} {'Ct/St':<8} {'RunOut Pts':<12} {'Total':<8}")
         lines.append("-" * 95)
         
@@ -461,15 +461,15 @@ class PointsCalculator:
             name = player.name[:34] if len(player.name) > 34 else player.name
             lines.append(f"{name:<35} {player.runs:<8} {player.wickets:<8} "
                          f"{player.catches:<8} {ro_str:<12} {tot_str:<8}")
-        lines.append("=" * 95)
+        lines.append("\n")
         
         chunks = []
-        current_chunk = "```text\n"
+        current_chunk = "```\n"
         for line in lines:
             if len(current_chunk) + len(line) + 10 > 2000:
                 current_chunk += "```"
                 chunks.append(current_chunk)
-                current_chunk = "```text\n" + line + "\n"
+                current_chunk = "```\n" + line + "\n"
             else:
                 current_chunk += line + "\n"
         current_chunk += "```"
@@ -676,17 +676,17 @@ async def matchup_points(ctx, url: str = None, *, players_input: str = None):
         team2_total = sum(effective_points(player, team2_mult[name]) for name, player in team2_matched.items())
 
         # ----- Build comparison table -----
-        lines = ["=" * 80, "          🏏 FANTASY MATCHUP COMPARISON 🏏", "=" * 80]
+        lines = []
 
         for team_name, matched, mults, display_map, total in [
             (team1_name, team1_matched, team1_mult, team1_display, team1_total),
             (team2_name, team2_matched, team2_mult, team2_display, team2_total)
         ]:
             if matched:
-                lines.append(f"\n📊 **{team_name}** ({len(matched)} players)")
-                lines.append("-" * 60)
+                lines.append(f"\n📊{team_name} ({len(matched)} players)")
+                #lines.append( "\n")
                 lines.append(f"{'Player':<30} {'Runs':<8} {'Wkts':<8} {'Ct/St':<8} {'RunOut':<10} {'Points':<8}")
-                lines.append("-" * 60)
+                #lines.append( "\n")
                 sorted_team = sorted(matched.items(), key=lambda x: effective_points(x[1], mults[x[0]]), reverse=True)
                 for name, player in sorted_team:
                     mult = mults[name]
@@ -702,37 +702,37 @@ async def matchup_points(ctx, url: str = None, *, players_input: str = None):
                     if len(display_name) > 29:
                         display_name = display_name[:26] + "..."
                     lines.append(f"{display_name:<30} {player.runs:<8} {player.wickets:<8} {player.catches:<8} {ro_str:<10} {eff_str:<8}")
-                lines.append("-" * 60)
+                #lines.append( "\n")
                 total_str = f"{total:.1f}" if total % 1 != 0 else f"{int(total)}"
                 lines.append(f"{'TEAM TOTAL':<30} {'':<8} {'':<8} {'':<8} {'':<10} {total_str:<8}")
             else:
                 lines.append(f"\n📊 **{team_name}** (0 players)")
-                lines.append("-" * 60)
+                #lines.append( "\n")
                 lines.append("No valid players found")
-                lines.append("-" * 60)
+                #lines.append( "\n")
                 lines.append(f"{'TEAM TOTAL':<30} {'':<8} {'':<8} {'':<8} {'':<10} 0")
 
-        lines.append("")
-        lines.append("=" * 80)
+        #lines.append("")
+        #lines.append("\n")
         if team1_total > team2_total:
             diff = team1_total - team2_total
             diff_str = f"{diff:.1f}" if diff % 1 != 0 else f"{int(diff)}"
-            lines.append(f"🏆 **{team1_name} WINS!** (Lead by {diff_str} points)")
+            lines.append(f"🏆 {team1_name} is leading by {diff_str} points)")
         elif team2_total > team1_total:
             diff = team2_total - team1_total
             diff_str = f"{diff:.1f}" if diff % 1 != 0 else f"{int(diff)}"
-            lines.append(f"🏆 **{team2_name} WINS!** (Lead by {diff_str} points)")
+            lines.append(f"🏆 {team2_name} is leading by {diff_str} points)")
         else:
             lines.append("🤝 **IT'S A TIE!**")
-        lines.append("=" * 80)
+        lines.append("\n")
 
         # Send table (chunked)
-        current_chunk = "```text\n"
+        current_chunk = "```\n"
         for line in lines:
             if len(current_chunk) + len(line) + 10 > 2000:
                 current_chunk += "```"
                 await ctx.send(current_chunk)
-                current_chunk = "```text\n" + line + "\n"
+                current_chunk = "```\n" + line + "\n"
             else:
                 current_chunk += line + "\n"
         if current_chunk:
