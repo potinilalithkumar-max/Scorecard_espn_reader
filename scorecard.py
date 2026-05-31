@@ -8,6 +8,11 @@ Discord Bot Commands:
 !points [optional_url] - Calculates points and exports to a local CSV file.
 !matchup [url_or_teams...]  - Parses teams (format: Team1: P1, P2 Team2: P3, P4),
                          resolves via scraped data, and crowns a winner.
+          
+!live_matchup [url_or_teams...]  - Parses teams (format: Team1: P1, P2 Team2: P3, P4),
+                         resolves via scraped data, and crowns a winner for every 2 minutes
+
+!stop_live_matchup to stop the automatic updates.
 """
 
 import re
