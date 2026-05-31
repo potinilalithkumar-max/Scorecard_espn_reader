@@ -15,7 +15,7 @@ import json
 import csv
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import discord
 from discord.ext import commands
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -751,7 +751,215 @@ async def matchup_points(ctx, url: str = None, *, players_input: str = None):
     finally:
         # Allow the same command to run again after completion
         active_matchups.discard(dedup_key)
+        
+# Global registry of active live matchup tasks per channel
+live_matchup_tasks: Dict[int, asyncio.Task] = {}
+
+async def live_matchup_loop(
+    channel: discord.TextChannel,
+    match_url: str,
+    team1_name: str,
+    team2_name: str,
+    team1_entries: List[Tuple[str, float, str]],  # (clean_name, multiplier, original_str)
+    team2_entries: List[Tuple[str, float, str]]
+):
+    """
+    Repeatedly scrapes the match, calculates points, and sends the
+    matchup table to the given channel every 300 seconds.
+    """
+    while True:
+        try:
+            # Scrape fresh data
+            scraper = EspnCricinfoScraper(headless=False)
+            match_data = await scraper.fetch_by_url(match_url)
+
+            if not match_data or not match_data.get("innings"):
+                await channel.send("⚠️ Live matchup failed to scrape data. Retrying in 5 minutes…")
+                await asyncio.sleep(300)
+                continue
+
+            # Calculate points
+            calculator = PointsCalculator()
+            player_points = calculator.process_match(match_data)
+
+            # Match players to the two teams (same logic as !matchup)
+            team1_matched = {}
+            team2_matched = {}
+            team1_mult = {}
+            team2_mult = {}
+
+            for clean, mult, orig in team1_entries:
+                resolved = calculator._find_player_by_short_name(clean)
+                if resolved and resolved in player_points:
+                    team1_matched[resolved] = player_points[resolved]
+                    team1_mult[resolved] = mult
+
+            for clean, mult, orig in team2_entries:
+                resolved = calculator._find_player_by_short_name(clean)
+                if resolved and resolved in player_points:
+                    team2_matched[resolved] = player_points[resolved]
+                    team2_mult[resolved] = mult
+
+            # Calculate effective totals
+            def effective_points(pp, mult):
+                return pp.total_points * mult
+
+            team1_total = sum(effective_points(team1_matched[name], team1_mult[name]) for name in team1_matched)
+            team2_total = sum(effective_points(team2_matched[name], team2_mult[name]) for name in team2_matched)
+
+            # Build output table
+            lines = ["🏏 LIVE FANTASY MATCHUP (auto‑updating every 2 min) 🏏\n"]
+            lines.append(f"🔗 {match_url}\n")
+
+            for team_name, matched, mults, total in [
+                (team1_name, team1_matched, team1_mult, team1_total),
+                (team2_name, team2_matched, team2_mult, team2_total)
+            ]:
+                if matched:
+                    lines.append(f"\n📊 **{team_name}**")
+                    lines.append(f"{'Player':<30} {'Runs':<8} {'Wkts':<8} {'Ct/St':<8} {'RunOut':<10} {'Points':<8}")
+                    sorted_team = sorted(matched.items(), key=lambda x: effective_points(x[1], mults[x[0]]), reverse=True)
+                    for name, player in sorted_team:
+                        mult = mults[name]
+                        eff_total = effective_points(player, mult)
+                        ro_str = f"{player.runout_points:.1f}" if player.runout_points % 1 != 0 else f"{int(player.runout_points)}"
+                        eff_str = f"{eff_total:.1f}" if eff_total % 1 != 0 else f"{int(eff_total)}"
+                        display_name = name
+                        if mult == 2.0:
+                            display_name += " (c)"
+                        elif mult == 1.5:
+                            display_name += " (vc)"
+                        if len(display_name) > 29:
+                            display_name = display_name[:26] + "..."
+                        lines.append(f"{display_name:<30} {player.runs:<8} {player.wickets:<8} {player.catches:<8} {ro_str:<10} {eff_str:<8}")
+                    total_str = f"{total:.1f}" if total % 1 != 0 else f"{int(total)}"
+                    lines.append(f"{'TEAM TOTAL':<30} {'':<8} {'':<8} {'':<8} {'':<10} {total_str:<8}")
+                else:
+                    lines.append(f"\n📊 **{team_name}** – No valid players in this update")
+
+            lines.append("")
+            if team1_total > team2_total:
+                diff = team1_total - team2_total
+                diff_str = f"{diff:.1f}" if diff % 1 != 0 else f"{int(diff)}"
+                lines.append(f"🏆 **{team1_name} LEADS** by {diff_str} points")
+            elif team2_total > team1_total:
+                diff = team2_total - team1_total
+                diff_str = f"{diff:.1f}" if diff % 1 != 0 else f"{int(diff)}"
+                lines.append(f"🏆 **{team2_name} LEADS** by {diff_str} points")
+            else:
+                lines.append("🤝 **CURRENTLY TIED**")
+            lines.append("\n")
+
+            # Chunk and send
+            current_chunk = "```text\n"
+            for line in lines:
+                if len(current_chunk) + len(line) + 10 > 2000:
+                    current_chunk += "```"
+                    await channel.send(current_chunk)
+                    current_chunk = "```text\n" + line + "\n"
+                else:
+                    current_chunk += line + "\n"
+            if current_chunk:
+                current_chunk += "```"
+                await channel.send(current_chunk)
+
+        except asyncio.CancelledError:
+            # Task was cancelled – clean exit
+            break
+        except Exception as e:
+            print(f"❌ Error in live matchup loop: {e}")
+            await channel.send(f"⚠️ Live matchup error: {e}. Will try again in 5 minutes.")
+
+        # Wait 5 minutes before next update
+        try:
+            await asyncio.sleep(120)
+        except asyncio.CancelledError:
+            break
+
+
+@bot.command(name="live_matchup")
+@commands.cooldown(1, 10, commands.BucketType.user)
+async def live_matchup_start(ctx, url: str = None, *, players_input: str = None):
+    """
+    Start a live fantasy matchup that updates every 5 minutes.
+    Usage: !live_matchup [url] Team1: Player(c), Player2(vc)  Team2: Player3(c), Player4(vc)
+    """
+    # Cancel any existing live matchup in this channel
+    if ctx.channel.id in live_matchup_tasks:
+        old_task = live_matchup_tasks.pop(ctx.channel.id)
+        old_task.cancel()
+        await ctx.send("🔄 Previous live matchup stopped. Starting a new one…")
+
+    # ----- Re-use the exact parsing logic from !matchup -----
+    if url and url.startswith("http"):
+        match_url = url
+        if not players_input:
+            await ctx.send("❌ Missing teams. Use: `!live_matchup [url] Team1: players Team2: players`")
+            return
+    else:
+        match_url = "https://www.espncricinfo.com/series/ipl-2026-1510719/rajasthan-royals-vs-sunrisers-hyderabad-eliminator-1535463/full-scorecard"
+        if url:
+            players_input = f"{url} {players_input}" if players_input else url
+
+    if not players_input:
+        await ctx.send("❌ Please provide teams. Example: `!live_matchup Chethan: Donovan(c),Prasidh(vc) Dinesh: Gill(c),Buttler(vc)`")
+        return
+
+    # Parse teams
+    team_matches = list(re.finditer(r'([A-Za-z][A-Za-z\s]+?)\s*:\s*([^:]+?)(?=\s+[A-Za-z][A-Za-z\s]+:|$)', players_input))
+    if len(team_matches) < 2:
+        await ctx.send("❌ Need two teams. Use `Team1: players Team2: players`")
+        return
+
+    teams_data = []
+    for m in team_matches:
+        team_name = m.group(1).strip()
+        players_str = m.group(2).strip()
+        players = [p.strip() for p in players_str.split(',') if p.strip()]
+        if team_name and players:
+            teams_data.append((team_name, players))
+
+    if len(teams_data) < 2:
+        await ctx.send("❌ Each team must have at least one player.")
+        return
+
+    team1_name, team1_raw = teams_data[0]
+    team2_name, team2_raw = teams_data[1]
+
+    # Parse multipliers
+    def parse_player_multiplier(player_str: str):
+        mult = 1.0
+        clean = player_str.strip()
+        match = re.search(r'\((c|vc)\)', clean, re.IGNORECASE)
+        if match:
+            role = match.group(1).lower()
+            mult = 2.0 if role == 'c' else 1.5
+            clean = re.sub(r'\s*\((c|vc)\)\s*', '', clean, flags=re.IGNORECASE).strip()
+        return clean, mult
+
+    team1_entries = [(clean, mult, orig) for orig in team1_raw for clean, mult in [parse_player_multiplier(orig)]]
+    team2_entries = [(clean, mult, orig) for orig in team2_raw for clean, mult in [parse_player_multiplier(orig)]]
+
+    await ctx.send(f"✅ Live matchup started! **{team1_name}** vs **{team2_name}** – updating every 5 minutes.")
+    await ctx.send(f"🔗 Match URL: {match_url}")
+
+    # Start the background loop
+    task = asyncio.create_task(
+        live_matchup_loop(ctx.channel, match_url, team1_name, team2_name, team1_entries, team2_entries)
+    )
+    live_matchup_tasks[ctx.channel.id] = task
+
+
+@bot.command(name="stop_live_matchup")
+async def live_matchup_stop(ctx):
+    """Stop the live matchup auto‑updates in this channel."""
+    if ctx.channel.id in live_matchup_tasks:
+        task = live_matchup_tasks.pop(ctx.channel.id)
+        task.cancel()
+        await ctx.send("🛑 Live matchup stopped.")
+    else:
+        await ctx.send("⚠️ No active live matchup in this channel.")
 
 if __name__ == "__main__":
-    DISCORD_BOT_TOKEN = "my_token"
+    DISCORD_BOT_TOKEN = "mytoken"
     bot.run(DISCORD_BOT_TOKEN)
